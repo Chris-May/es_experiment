@@ -20,10 +20,11 @@ class DomainEvent:
         stored_at: dt.datetime | None = None,
     ):
         self.event_name = event_name
-        self.tags: dict = tags or {}
-        self.metadata: dict = metadata or {}
-        self.event_id: int = event_id or utc_now().timestamp()
-        self.stored_at: stored_at or utc_now()
+        self.tags = tags or {}
+        self.metadata = metadata or {}
+        self.event_id = event_id or str(utc_now().timestamp())
+        self.stored_at = stored_at or utc_now()
+        self.details = {}
 
     def __getitem__(self, item):
         if item not in self.tags:
@@ -43,17 +44,17 @@ class CourseCreated(DomainEvent):
         self.tags |= dict(
             course_id=self.course_id,
             course_name=self.course_name,
-            capacity=self.capacity,
         )
+        self.details = dict(course_name=course_name, capacity=capacity)
 
 
 slice_tests = []
 event_log = []
 
 
-def create_course(history: list[dict], command):
+def create_course(history: list[DomainEvent], command):
     for event in history:
-        if event["name"] == command["name"]:
+        if isinstance(event, CourseCreated) and event.course_name == command['name']:
             raise ValueError("Course name already exists")
     return CourseCreated(course_name=command["name"], capacity=command["capacity"])
 
@@ -70,16 +71,21 @@ slice_tests.append(
                             "type": "create_course",
                             "data": dict(name="English 101", capacity=33),
                         },
+                        "event": CourseCreated(course_name='English 101', capacity=33),
+                    },
+                    {
+                        "command": {
+                            "type": "create_course",
+                            "data": dict(name="English 101", capacity=33),
+                        },
                         "event": {
                             "type": "course_created",
-                            "data": dict(
+                            "data": CourseCreated(
                                 course_name="English 101",
                                 capacity=33,
-                                course_id=create_id("English 101"),
                             ),
                         },
                     },
-
                 ],
             }
         ],
@@ -87,8 +93,8 @@ slice_tests.append(
 )
 
 
-def enroll_student(name: str):
-    ...
+def enroll_student(history: list[dict], command): ...
+
 
 slice_tests.append(
     {
@@ -98,14 +104,11 @@ slice_tests.append(
                 "timeline_name": "Happy path",
                 "checkpoints": [
                     {
-                        'command': {
-                            'type': 'enroll_student',
-                            'data': dict(name='Bob Marley')
-                        },
+                        'command': {'type': 'enroll_student', 'data': dict(name='Bob Marley')},
                         'event': {
                             'type': 'student_enrolled',
                             'data': dict(name='Bob Marley', student_id=create_id("Bob Marley")),
-                        }
+                        },
                     },
                 ],
             }
@@ -114,31 +117,22 @@ slice_tests.append(
 )
 
 
-
 class TestLifecycle(unittest.TestCase):
     def test_slices(self):
         for slice in slice_tests:
 
             def run_slice_test(events, checkpoint):
                 if checkpoint["command"]:  # Change state test
-                    if (
-                        checkpoint["event"] and "exception" not in checkpoint
-                    ):  # Test success
-                        result = slice["test_function"](
-                            events, checkpoint["command"]["data"]
-                        )
+                    if checkpoint["event"] and "exception" not in checkpoint:  # Test success
+                        result = slice["test_function"](events, checkpoint["command"]["data"])
                         details = result.get_details()
-                        assert details == checkpoint["event"]
-                    elif (
-                        checkpoint["exception"] and "event" not in checkpoint
-                    ):  # Test exception
+                        assert details == checkpoint["event"].get_details()
+                    elif checkpoint["exception"] and "event" not in checkpoint:  # Test exception
                         try:
                             slice["test_function"](events, checkpoint["command"])
                         except Exception as e:
                             assert checkpoint["exception"].message == e.message
-                        raise ValueError(
-                            f"{checkpoint['name']} should have thrown exceptions"
-                        )
+                        raise ValueError(f"{checkpoint['name']} should have thrown exceptions")
                     else:
                         raise ValueError("Bad checkpoint structure")
                 else:  # State view test
@@ -146,6 +140,7 @@ class TestLifecycle(unittest.TestCase):
                     assert result == checkpoint["state"]
                 if checkpoint["event"]:
                     events.append(checkpoint["event"])
+                    return events
 
             for timeline in slice["timelines"]:
                 functools.reduce(run_slice_test, timeline["checkpoints"], [])
